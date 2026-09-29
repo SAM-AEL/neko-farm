@@ -28,7 +28,6 @@ anything. Target host comes from `deploy.env`:
 | `DEPLOY_USER` | SSH user |
 | `DEPLOY_PORT` | SSH port |
 | `DEPLOY_PATH` | Deploy directory on the VPS — must be writable by `DEPLOY_USER` |
-| `DEPLOY_SUDO` | `sudo`, or empty if already root / in the docker group |
 | `PUBLIC_HOSTNAME` | Public hostname — printed at the end, not configured by the script |
 
 What `yarn deploy` does: validate the compose file locally → check docker, disk
@@ -45,6 +44,10 @@ password locally will not silently change the running server.
 `DEPLOY_PATH` must be writable by the SSH user because rsync runs unprivileged —
 `/opt/neko-farm` will not work for a non-root user. `~` is resolved to the remote
 home directory.
+
+`DEPLOY_USER` also needs access to the docker daemon. The script detects this and
+fails with instructions if it is missing. Note that membership of the `docker`
+group is equivalent to root access on that host.
 
 ## Files
 
@@ -226,6 +229,7 @@ df -h                                  # disk, especially after image pulls
 | `yarn deploy` cannot reach VPS | `DEPLOY_HOST`/`DEPLOY_USER`/`DEPLOY_PORT`, or SSH key not loaded |
 | Deploy ran but old behaviour persists | remote `.env` is intentionally not overwritten — edit it on the VPS |
 | `mkdir: Permission denied` on deploy | `DEPLOY_PATH` not writable by the SSH user — use `~/neko-farm` |
+| `sudo: a terminal is required` on deploy | `DEPLOY_USER` lacks daemon access — add them to the `docker` group |
 
 Reclaim disk with `docker image prune -a` before adding anything else; 8 GB is the
 tightest constraint here.

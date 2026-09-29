@@ -13,7 +13,7 @@ services:
     # shm_size is a ceiling on tmpfs, not a reservation — it costs nothing until
     # used. Firefox does not need Chromium's 2 GB, so this is headroom, not pressure.
     shm_size: 512mb
-    mem_limit: 600m
+    mem_limit: 700m
     mem_reservation: 250m
     ports:
       - "127.0.0.1:7000:8080"          # TCP signaling/UI, localhost only
@@ -29,10 +29,20 @@ services:
       - NEKO_WEBRTC_NAT1TO1=${VPS_PUBLIC_IP}
       # cloudflared terminates TLS — without this Neko ignores X-Forwarded-*.
       - NEKO_SERVER_PROXY=true
-      # 10 fps at 720p is ample for a low-quality source and cuts X + encode load.
-      - NEKO_DESKTOP_SCREEN=1280x720@10
+      # 10 fps at 576p: cuts X framebuffer and VP8 encode load. Memory, not CPU,
+      # is the binding constraint on a 1 GB box — keep the frame small.
+      - NEKO_DESKTOP_SCREEN=1024x576@10
       # Session provider defaults to in-memory, which means re-authenticating to
       # Neko itself on every restart. Persist it alongside the browser profile.
+      # The v2-era web client authenticates the WebSocket with an explicit
+      # token. With cookie auth on (the v3 default) the login response carries
+      # no token and the client is disconnected with
+      # "token not found - make sure you are not using Cookie auth".
+      # Turning cookies off returns the token in the login response instead.
+      # Trade-off: the token lands in localStorage, so it is exposed to XSS
+      # where a cookie is not. Cloudflare Access in front is what makes that
+      # acceptable here.
+      - NEKO_SESSION_COOKIE_ENABLED=false
       - NEKO_SESSION_FILE=/data/sessions.json
       # Neko plugins only — these gate Neko's own chat and file transfer, not
       # anything in the browsing session. Source reads `chat.enabled` /

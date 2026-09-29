@@ -37,8 +37,13 @@ RSYNC_EXCLUDES=(
   --exclude 'profile/' --exclude '.env' --exclude 'deploy.env'
 )
 
+DOCKER_SUDO=""
+
 remote() { ssh "${SSH_OPTS[@]}" "$DEPLOY_USER@$DEPLOY_HOST" "$@"; }
-remote_sudo() { if [[ -n "${DEPLOY_SUDO:-}" ]]; then remote "$DEPLOY_SUDO" "$@"; else remote "$@"; fi; }
+# DOCKER_SUDO is decided by remote_preflight, which probes the daemon. A
+# configurable sudo mode is deliberately not offered: a password-prompting
+# sudo over a non-interactive ssh hangs the deploy instead of failing.
+remote_sudo() { if [[ -n "$DOCKER_SUDO" ]]; then remote "$DOCKER_SUDO" "$@"; else remote "$@"; fi; }
 
 # ---------------------------------------------------------------- preflight --
 
@@ -76,8 +81,21 @@ resolve_path() {
 
 remote_preflight() {
   log "Checking VPS"
-  remote "docker --version" >/dev/null 2>&1 || die "docker is not installed on the VPS"
-  remote "docker compose version" >/dev/null 2>&1 || die "docker compose plugin is not installed on the VPS"
+  # Probe the daemon, not the client: `docker --version` succeeds even for a
+  # user with no daemon access, which made the old check pass pointlessly.
+  if remote "docker info" >/dev/null 2>&1; then
+    DOCKER_SUDO=""
+    dim "docker daemon accessible directly (no sudo needed)"
+  elif remote "sudo -n docker info" >/dev/null 2>&1; then
+    DOCKER_SUDO="sudo -n"
+    dim "docker daemon needs passwordless sudo"
+  else
+    die "no docker access as $DEPLOY_USER, and passwordless sudo is unavailable.
+       Fix it on the VPS — either:
+         sudo usermod -aG docker $DEPLOY_USER
+       then reconnect so the new group takes effect. Note that membership of the
+       docker group is equivalent to root access on that host."
+  fi
 
   # awk rather than `tail -1` so a header line cannot be mistaken for the value,
   # and the result is validated rather than coerced — silently concatenating

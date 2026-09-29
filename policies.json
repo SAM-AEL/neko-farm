@@ -55,14 +55,6 @@
     "ExtensionSettings": {
       "*": {
         "installation_mode": "blocked"
-      },
-      "sponsorBlocker@ajay.app": {
-        "install_url": "https://addons.mozilla.org/firefox/downloads/latest/sponsorblock/latest.xpi",
-        "installation_mode": "force_installed"
-      },
-      "uBlock0@raymondhill.net": {
-        "install_url": "https://addons.mozilla.org/firefox/downloads/latest/ublock-origin/latest.xpi",
-        "installation_mode": "force_installed"
       }
     },
     "ExtensionUpdate": false,
@@ -113,7 +105,13 @@
       "places.history.enabled": false,
       "privacy.file_unique_origin": true,
       "ui.key.menuAccessKeyFocuses": false,
-      "browser.tabs.allowTabDetach": false
+      "browser.tabs.allowTabDetach": false,
+      "fission.autostart": false,
+      "dom.ipc.processCount": 2,
+      "extensions.webextensions.remote": false,
+      "browser.tabs.memoryBudget.enabled": true,
+      "browser.tabs.unloadOnLowMemory": true,
+      "network.prefetch-next": false
     },
     "PromptForDownloadLocation": false,
     "SanitizeOnShutdown": {
