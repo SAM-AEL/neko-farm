@@ -1,0 +1,58 @@
+# cloudflared is NOT part of this stack. It already runs on the VPS as a host
+# service and owns the tunnel; this compose only has to expose Neko for it to
+# forward to. Point the Cloudflare public hostname at http://localhost:7000.
+#
+# `name` is set explicitly so container names are stable regardless of which
+# directory this was cloned into (otherwise they follow the folder name).
+name: neko-farm
+
+services:
+  neko:
+    image: ghcr.io/m1k1o/neko/firefox:3
+    restart: unless-stopped
+    # shm_size is a ceiling on tmpfs, not a reservation — it costs nothing until
+    # used. Firefox does not need Chromium's 2 GB, so this is headroom, not pressure.
+    shm_size: 512mb
+    mem_limit: 600m
+    mem_reservation: 250m
+    ports:
+      - "127.0.0.1:7000:8080"          # TCP signaling/UI, localhost only
+      - "52000-52100:52000-52100/udp"  # WebRTC media — must be reachable directly
+    environment:
+      # v3 renamed these; NEKO_PASSWORD / NEKO_PASSWORD_ADMIN are v2 names.
+      - NEKO_MEMBER_MULTIUSER_USER_PASSWORD=${NEKO_PASSWORD}
+      - NEKO_MEMBER_MULTIUSER_ADMIN_PASSWORD=${NEKO_PASSWORD_ADMIN}
+      # MUST match the published UDP range above, or ICE advertises the
+      # v3 default (59000-59100) and media never connects.
+      - NEKO_WEBRTC_EPR=52000-52100
+      - NEKO_WEBRTC_ICELITE=1
+      - NEKO_WEBRTC_NAT1TO1=${VPS_PUBLIC_IP}
+      # cloudflared terminates TLS — without this Neko ignores X-Forwarded-*.
+      - NEKO_SERVER_PROXY=true
+      # 10 fps at 720p is ample for a low-quality source and cuts X + encode load.
+      - NEKO_DESKTOP_SCREEN=1280x720@10
+      # Session provider defaults to in-memory, which means re-authenticating to
+      # Neko itself on every restart. Persist it alongside the browser profile.
+      - NEKO_SESSION_FILE=/data/sessions.json
+      # Neko plugins only — these gate Neko's own chat and file transfer, not
+      # anything in the browsing session. Source reads `chat.enabled` /
+      # `filetransfer.enabled`, so these are the top-level names. The
+      # "plugin started" log line still appears: built-ins are registered
+      # unconditionally in the plugin manager, and this only gates features.
+      - NEKO_CHAT_ENABLED=false
+      - NEKO_FILETRANSFER_ENABLED=false
+      - NEKO_CONFIG=/etc/neko/neko.yaml
+      - TZ=Etc/UTC
+    volumes:
+      - ./profile:/home/neko/.mozilla/firefox/profile.default
+      - ./policies.json:/usr/lib/firefox/distribution/policies.json:ro
+      - ./neko.yaml:/etc/neko/neko.yaml:ro
+      - neko-data:/data
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "1"
+
+volumes:
+  neko-data:

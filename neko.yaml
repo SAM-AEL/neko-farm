@@ -1,0 +1,21 @@
+# Captures the browser window and encodes it for WebRTC.
+# NEKO_VIDEO_BITRATE / NEKO_MAX_FPS were removed in v3 — both live here now.
+# This is the main CPU and egress lever on a 1 vCPU box, so it is worth the file.
+#
+# NOTE: Firefox needs no shm tuning, so the only expensive knob left is the
+# encoder. 400 kbps at 10 fps is still comfortably above a 160p source.
+capture:
+  video:
+    codec: vp8
+    ids:
+      - lq
+    pipelines:
+      lq:
+        fps: 10
+        gst_encoder: vp8enc
+        gst_params:
+          target-bitrate: 400000
+          cpu-used: 8
+          deadline: 1
+          threads: 1
+          keyframe-max-dist: 20

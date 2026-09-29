@@ -1,0 +1,10 @@
+{
+  "name": "neko-farm",
+  "version": "1.0.0",
+  "license": "MIT",
+  "description": "Persistent remote browser on a small VPS, reachable over a Cloudflare Tunnel",
+  "scripts": {
+    "deploy": "bash scripts/deploy.sh",
+    "deploy:check": "bash scripts/deploy.sh --check"
+  }
+}

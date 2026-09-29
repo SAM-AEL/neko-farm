@@ -1,0 +1,11 @@
+.env
+deploy.env
+profile/
+node_modules/
+
+# Yarn PnP runtime artifacts — machine-specific, not source.
+.pnp.cjs
+.yarn/
+
+# SSH askpass helper containing a plaintext password. Never commit this.
+askpass.sh
