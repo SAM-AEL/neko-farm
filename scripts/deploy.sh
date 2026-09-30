@@ -150,8 +150,32 @@ sync_files() {
 start() {
   log "Starting stack"
   remote "mkdir -p '$DEPLOY_PATH/profile'"
+  # Chown first: a file left root-owned by an earlier mount would otherwise
+  # block the copy below, since the SSH user cannot overwrite it.
   # Firefox refuses to run against a root-owned profile.
   remote_sudo "chown -R 1000:1000 '$DEPLOY_PATH/profile'"
+  # The named volume is created root-owned by docker, but Neko runs as UID 1000
+  # and cannot write its session file without this. Note remote_sudo only gains
+  # root when passwordless sudo is available, so this can legitimately fail —
+  # say so rather than swallowing it.
+  local vol
+  vol=$(remote "docker volume ls -q --filter name=neko-farm_neko-data 2>/dev/null | head -1")
+  if [[ -n "$vol" ]] && ! remote_sudo "chown -R 1000:1000 /var/lib/docker/volumes/$vol/_data" 2>/dev/null; then
+    warn "could not chown $vol (needs root). Neko sessions will not persist across"
+    warn "restarts, so you will re-log in to Neko each time. Fix once with:"
+    printf '%s\n' "      ssh -p $DEPLOY_PORT $DEPLOY_USER@$DEPLOY_HOST \\" \
+      "        'sudo chown -R 1000:1000 /var/lib/docker/volumes/$vol/_data'"
+  fi
+  # user.js is copied into the profile rather than bind-mounted into it: nesting
+  # a mount inside the profile mount leaves a read-only mountpoint that
+  # `chown -R` cannot traverse, which aborts the deploy.
+  if [[ -f user.js ]]; then
+    # Unlink first rather than overwrite: a file left root-owned by an earlier
+    # nested mount cannot be overwritten by the SSH user, but it can be removed,
+    # since that only needs write permission on the directory.
+    remote "rm -f '$DEPLOY_PATH/profile/user.js' && cp '$DEPLOY_PATH/user.js' '$DEPLOY_PATH/profile/user.js'"
+    dim "user.js installed into profile"
+  fi
   remote_sudo "cd '$DEPLOY_PATH' && docker compose up -d --remove-orphans"
 }
 

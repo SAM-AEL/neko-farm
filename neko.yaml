@@ -3,7 +3,8 @@
 # This is the main CPU and egress lever on a 1 vCPU box, so it is worth the file.
 #
 # NOTE: Firefox needs no shm tuning, so the only expensive knob left is the
-# encoder. 400 kbps at 10 fps is still comfortably above a 160p source.
+# encoder. Tuned for a 2 GB host: the earlier 200 kbps / 5 fps values were a
+# 1 GB emergency setting and looked badly blocky on a real video stream.
 capture:
   video:
     codec: vp8
@@ -14,7 +15,7 @@ capture:
         fps: 10
         gst_encoder: vp8enc
         gst_params:
-          target-bitrate: 400000
+          target-bitrate: 800000
           cpu-used: 8
           deadline: 1
           threads: 1

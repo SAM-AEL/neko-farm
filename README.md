@@ -107,13 +107,15 @@ drive, including anything you are already signed into.
 
 ### 4. Firewall
 
-The tunnel is outbound-only, so no 80/443 needed. Media is the exception:
+Two inbound ports in total. The tunnel is outbound-only, so no 80/443 needed.
 
-```bash
-sudo ufw allow 52000:52100/udp
-sudo ufw deny 7000/tcp    # bound to localhost in compose anyway
-sudo ufw enable
-```
+| Port | Proto | Purpose |
+| --- | --- | --- |
+| your SSH port | TCP | already open |
+| `52000` | TCP | WebRTC media (single port, see above) |
+
+If a host firewall is in play: `sudo ufw allow 52000/tcp`. Do **not** open `7000`
+— it is bound to `127.0.0.1` and cloudflared reaches it over loopback.
 
 Port 7000 is already published on `127.0.0.1` only. If you ever rebind it to
 `0.0.0.0` you create a second entry point that bypasses Cloudflare Access.
@@ -175,12 +177,28 @@ Neko splits its traffic, and only half of it can be tunneled:
 
 ```
 you --HTTPS--> Cloudflare edge --> cloudflared (VPS) --> localhost:7000   UI/signaling
-you --WebRTC UDP-----------------------------------> VPS:52000-52100     video/audio
+you --WebRTC over TCP------------------------------> VPS:52000/tcp        video/audio
 ```
 
-A Cloudflare HTTP tunnel does not proxy WebRTC media, so the UDP range is exposed
-directly. This is by design, not a misconfiguration. If the UI loads but the
-picture stays black, UDP is being blocked somewhere between you and the VPS.
+A Cloudflare HTTP tunnel does not proxy WebRTC media, so the media port is
+exposed directly. This is by design, not a misconfiguration. If the UI loads but
+the picture stays black, that port is being blocked between you and the VPS.
+
+**Why TCP and not UDP.** WebRTC normally opens an ephemeral UDP port per
+connection, so the default setup needs all of `52000-52100/udp` reachable. If
+your provider's firewall wants one rule per port, that is impractical.
+`NEKO_WEBRTC_TCPMUX=52000` multiplexes every media connection onto a single TCP
+port instead — one rule, and TCP is the protocol most likely already permitted.
+The cost is some latency and head-of-line blocking under load, so video can be
+less smooth than native UDP would be.
+
+To go back to UDP, replace the `52000:52000/tcp` mapping with
+`52000-52100:52000-52100/udp` and set `NEKO_WEBRTC_EPR=52000-52100` in place of
+`NEKO_WEBRTC_TCPMUX`. You can verify which one is live with:
+
+```bash
+docker compose logs neko | grep -oE 'tcpmux=[^ ]*|epr=[^ ]*'
+```
 
 ## Resource notes
 
@@ -220,7 +238,7 @@ df -h                                  # disk, especially after image pulls
 
 | Symptom | Likely cause |
 | --- | --- |
-| UI loads, picture black | UDP 52000-52100 blocked, or `VPS_PUBLIC_IP` wrong |
+| UI loads, picture black | TCP 52000 blocked upstream, or `VPS_PUBLIC_IP` wrong |
 | Restart-looping on start | bad `neko.yaml` or `policies.json` — check logs |
 | Signed out after reboot | `policies.json` not mounted, or `profile/` not chowned to 1000:1000 |
 | Signed out of Neko after reboot | `neko-data` volume removed, or `NEKO_SESSION_FILE` unset |
@@ -238,8 +256,9 @@ tightest constraint here.
 
 - `NEKO_SERVER_PROXY=true` is required — cloudflared terminates TLS, and without
   it Neko ignores `X-Forwarded-Proto` / `X-Forwarded-Host`.
-- `NEKO_WEBRTC_EPR` must match the published UDP range. Neko v3 defaults to
-  59000-59100, so omitting it means the server advertises ports you never opened.
+- Media uses `NEKO_WEBRTC_TCPMUX=52000` (one TCP port). If you switch back to
+  UDP, `NEKO_WEBRTC_EPR` must match the published range — Neko v3 defaults to
+  59000-59100, so omitting it advertises ports you never opened.
 - Firefox was chosen over Chromium deliberately: the Chromium image needs
   `shm_size` of 2 GB and runs `--no-sandbox`, neither of which suits 1 GB of RAM.
 - Neko 3 renamed several environment variables from v2. `NEKO_PASSWORD` and

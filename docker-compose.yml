@@ -13,24 +13,28 @@ services:
     # shm_size is a ceiling on tmpfs, not a reservation — it costs nothing until
     # used. Firefox does not need Chromium's 2 GB, so this is headroom, not pressure.
     shm_size: 512mb
-    mem_limit: 700m
-    mem_reservation: 250m
+    mem_limit: 1400m
+    mem_reservation: 500m
     ports:
       - "127.0.0.1:7000:8080"          # TCP signaling/UI, localhost only
-      - "52000-52100:52000-52100/udp"  # WebRTC media — must be reachable directly
+      # Media is multiplexed onto this single TCP port. WebRTC normally needs
+      # the whole 52000-52100/udp range open, which is impractical when the
+      # provider's firewall wants one rule per port. TCPMUX trades some
+      # latency/fairness for a one-port footprint.
+      - "52000:52000/tcp"
     environment:
       # v3 renamed these; NEKO_PASSWORD / NEKO_PASSWORD_ADMIN are v2 names.
       - NEKO_MEMBER_MULTIUSER_USER_PASSWORD=${NEKO_PASSWORD}
       - NEKO_MEMBER_MULTIUSER_ADMIN_PASSWORD=${NEKO_PASSWORD_ADMIN}
-      # MUST match the published UDP range above, or ICE advertises the
-      # v3 default (59000-59100) and media never connects.
-      - NEKO_WEBRTC_EPR=52000-52100
+      # Single TCP port for all WebRTC media instead of a 101-port UDP range.
+      # NAT1TO1 is still the public IP: the browser dials this directly, it is
+      # not tunnelled.
+      - NEKO_WEBRTC_TCPMUX=52000
       - NEKO_WEBRTC_ICELITE=1
       - NEKO_WEBRTC_NAT1TO1=${VPS_PUBLIC_IP}
       # cloudflared terminates TLS — without this Neko ignores X-Forwarded-*.
       - NEKO_SERVER_PROXY=true
-      # 10 fps at 576p: cuts X framebuffer and VP8 encode load. Memory, not CPU,
-      # is the binding constraint on a 1 GB box — keep the frame small.
+      # Tuned for a 2 GB host. The 800x600@5 values were a 1 GB emergency setting.
       - NEKO_DESKTOP_SCREEN=1024x576@10
       # Session provider defaults to in-memory, which means re-authenticating to
       # Neko itself on every restart. Persist it alongside the browser profile.
