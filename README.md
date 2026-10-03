@@ -248,6 +248,19 @@ df -h                                  # disk, especially after image pulls
 | Deploy ran but old behaviour persists | remote `.env` is intentionally not overwritten — edit it on the VPS |
 | `mkdir: Permission denied` on deploy | `DEPLOY_PATH` not writable by the SSH user — use `~/neko-farm` |
 | `sudo: a terminal is required` on deploy | `DEPLOY_USER` lacks daemon access — add them to the `docker` group |
+| Signed out of Neko after every restart | volume chown failed; `DEPLOY_USER` needs passwordless sudo, see below |
+| `ssh ... Connection timed out` mid-deploy | transient — the script retries automatically; raise `REMOTE_ATTEMPTS` if it persists |
+
+`DEPLOY_USER` needs **passwordless sudo** (`NOPASSWD: ALL`) for one step only:
+the `chown` of the `neko-data` volume under `/var/lib/docker`. Without it the
+deploy still completes, but Neko re-logs you in on every restart. Note this is
+independent of docker access — being in the `docker` group lets you *run*
+containers but does not let you `chown` docker's own files.
+
+The script opens a single multiplexed SSH connection (`ControlMaster`) and reuses
+it for every command and for `rsync`, then removes the socket on exit. This
+matters on slow links: measured 5–30s per fresh handshake here versus ~0.3s on
+reuse. Failed connections are retried up to `REMOTE_ATTEMPTS` (default 3).
 
 Reclaim disk with `docker image prune -a` before adding anything else; 8 GB is the
 tightest constraint here.
