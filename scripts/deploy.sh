@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Deploy the Neko stack to the VPS described in deploy.env.
+# Deploy the Neko stack to the VPS (supports original x86_64 and Ampere A1 ARM64).
 #
 # Design notes:
 #   - profile/ and .env are NEVER synced. profile/ holds the logged-in browser session and
@@ -10,13 +10,12 @@
 #     After that the server's copy wins, so password rotation stays deliberate.
 #   - cloudflared is not deployed here. It already runs on the VPS and forwards
 #     to 127.0.0.1:7000, so all this script does is make Neko reachable there.
+#   - Multi-arch: ghcr.io/m1k1o/neko/firefox:3 natively provides both linux/amd64
+#     and linux/arm64 manifests. The target architecture is probed at runtime.
 
 set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
-
-# shellcheck disable=SC1091
-source deploy.env
 
 if [[ -t 1 ]]; then
   C_RED=$'\033[31m'; C_GRN=$'\033[32m'; C_YLW=$'\033[33m'
@@ -30,11 +29,114 @@ warn() { printf '%s[!]%s %s\n' "$C_YLW" "$C_RST" "$*" >&2; }
 die()  { printf '%s[x]%s %s\n' "$C_RED" "$C_RST" "$*" >&2; exit 1; }
 dim()  { printf '%s    %s%s\n' "$C_DIM" "$*" "$C_RST"; }
 
-# The link to the VPS is slow to open (measured 5-30s per handshake) and
-# occasionally stalls past ConnectTimeout, which made a deploy fail at a random
-# step. One multiplexed master connection is established once and then reused by
-# every ssh call and by rsync; ControlPersist keeps it warm for the whole run and
-# the EXIT trap removes it afterwards.
+# ------------------------------------------------------------------ arguments & targets --
+
+CHECK_ONLY=false
+TARGET_NAME="${DEPLOY_TARGET:-}"
+
+# Preserve any variables explicitly exported in the current shell environment
+USER_SET_HOST="${DEPLOY_HOST:-}"
+USER_SET_USER="${DEPLOY_USER:-}"
+USER_SET_PORT="${DEPLOY_PORT:-}"
+USER_SET_PATH="${DEPLOY_PATH:-}"
+USER_SET_SSH_KEY="${SSH_KEY:-}"
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --check)
+      CHECK_ONLY=true
+      shift
+      ;;
+    --target)
+      TARGET_NAME="$2"
+      shift 2
+      ;;
+    --target=*)
+      TARGET_NAME="${1#*=}"
+      shift
+      ;;
+    --oracle|oracle)
+      TARGET_NAME="oracle"
+      shift
+      ;;
+    --original|original)
+      TARGET_NAME="original"
+      shift
+      ;;
+    -h|--help)
+      echo "Usage: $0 [--target original|oracle|<custom>] [--check]"
+      echo ""
+      echo "Targets:"
+      echo "  original   Deploy to original x86_64 VPS (reads deploy.original.env)"
+      echo "  oracle     Deploy to Oracle Ampere A1 ARM64 VPS (reads deploy.oracle.env / Doppler)"
+      echo ""
+      echo "Options:"
+      echo "  --check    Run preflight and connectivity tests without deploying"
+      exit 0
+      ;;
+    *)
+      if [[ -z "$TARGET_NAME" && ! "$1" =~ ^- ]]; then
+        TARGET_NAME="$1"
+        shift
+      else
+        warn "Unknown argument: $1"
+        shift
+      fi
+      ;;
+  esac
+done
+
+# Source target environment file
+if [[ -n "$TARGET_NAME" && -f "deploy.${TARGET_NAME}.env" ]]; then
+  # shellcheck disable=SC1090
+  source "deploy.${TARGET_NAME}.env"
+elif [[ -f "deploy.env" ]]; then
+  # shellcheck disable=SC1091
+  source "deploy.env"
+fi
+
+# Doppler integration fallback (shared with Kwitch & Denvo)
+# If target is oracle or DEPLOY_HOST is missing, attempt to fill from buzzeee/prd_infra
+if [[ -z "${DEPLOY_HOST:-}" || "$TARGET_NAME" == "oracle" ]]; then
+  if [[ -f "$HOME/.config/denvo/tokens.sh" ]]; then
+    # shellcheck disable=SC1090
+    source "$HOME/.config/denvo/tokens.sh"
+  fi
+  DOPPLER_INFRA_TOKEN="${DOPPLER_BUZZEEE_INFRA:-${DOPPLER_TOKEN_INFRA:-}}"
+  if [[ -n "$DOPPLER_INFRA_TOKEN" ]] && command -v doppler >/dev/null 2>&1; then
+    INFRA_JSON="$(DOPPLER_TOKEN="$DOPPLER_INFRA_TOKEN" doppler secrets download --no-file --format json --project buzzeee --config prd_infra 2>/dev/null || true)"
+    if [[ -n "$INFRA_JSON" ]]; then
+      DOPPLER_HOST="$(printf '%s' "$INFRA_JSON" | grep -o '"KWITCH_VPS_HOST":"[^"]*"' | cut -d'"' -f4 || true)"
+      DOPPLER_PORT="$(printf '%s' "$INFRA_JSON" | grep -o '"KWITCH_VPS_PORT":"[^"]*"' | cut -d'"' -f4 || true)"
+      DOPPLER_USER="$(printf '%s' "$INFRA_JSON" | grep -o '"KWITCH_VPS_USER":"[^"]*"' | cut -d'"' -f4 || true)"
+      if [[ -z "${DEPLOY_HOST:-}" && -n "$DOPPLER_HOST" ]]; then
+        DEPLOY_HOST="$DOPPLER_HOST"
+        dim "DEPLOY_HOST loaded from Doppler buzzeee/prd_infra ($DEPLOY_HOST)"
+      fi
+      if [[ -z "${DEPLOY_PORT:-}" && -n "$DOPPLER_PORT" ]]; then
+        DEPLOY_PORT="$DOPPLER_PORT"
+      fi
+      if [[ -z "${DEPLOY_USER:-}" && -n "$DOPPLER_USER" ]]; then
+        DEPLOY_USER="$DOPPLER_USER"
+      fi
+    fi
+  fi
+fi
+
+# Restore shell-exported overrides (they always take highest priority)
+[[ -n "$USER_SET_HOST" ]] && DEPLOY_HOST="$USER_SET_HOST"
+[[ -n "$USER_SET_USER" ]] && DEPLOY_USER="$USER_SET_USER"
+[[ -n "$USER_SET_PORT" ]] && DEPLOY_PORT="$USER_SET_PORT"
+[[ -n "$USER_SET_PATH" ]] && DEPLOY_PATH="$USER_SET_PATH"
+[[ -n "$USER_SET_SSH_KEY" ]] && SSH_KEY="$USER_SET_SSH_KEY"
+
+: "${DEPLOY_USER:=sam}"
+: "${DEPLOY_PORT:=22}"
+: "${DEPLOY_PATH:=~/neko-farm}"
+: "${SSH_KEY:=$HOME/.ssh/id_ed25519}"
+: "${TARGET_NAME:=default}"
+
+# Multiplexed SSH connection
 SSH_CTL_DIR=$(mktemp -d "${TMPDIR:-/tmp}/neko-deploy.XXXXXX")
 cleanup() {
   local rc=$?
@@ -53,23 +155,25 @@ SSH_OPTS=(
   -o ControlPath="$SSH_CTL_DIR/neko-%C"
   -o ControlPersist=300
 )
-# rsync does not inherit SSH_OPTS, so the same options are spelled out for -e.
-# %C is the hashed connection tuple, so concurrent deploys cannot collide.
-SSH_RSYNC="ssh -p $DEPLOY_PORT -o BatchMode=yes -o ConnectTimeout=30 -o ServerAliveInterval=30 -o ControlMaster=auto -o ControlPath=$SSH_CTL_DIR/neko-%C -o ControlPersist=300"
+
+if [[ -f "$SSH_KEY" ]]; then
+  SSH_OPTS+=(-i "$SSH_KEY")
+  SSH_RSYNC="ssh -i $SSH_KEY -p $DEPLOY_PORT -o BatchMode=yes -o ConnectTimeout=30 -o ServerAliveInterval=30 -o ControlMaster=auto -o ControlPath=$SSH_CTL_DIR/neko-%C -o ControlPersist=300"
+else
+  SSH_RSYNC="ssh -p $DEPLOY_PORT -o BatchMode=yes -o ConnectTimeout=30 -o ServerAliveInterval=30 -o ControlMaster=auto -o ControlPath=$SSH_CTL_DIR/neko-%C -o ControlPersist=300"
+fi
 
 RSYNC_EXCLUDES=(
   --exclude '.git/' --exclude 'node_modules/' --exclude '.commandcode/'
   --exclude '.yarn/' --exclude '.pnp.cjs'
-  --exclude 'profile/' --exclude '.env' --exclude 'deploy.env'
+  --exclude 'profile/' --exclude '.env' --exclude 'deploy.env' --exclude 'deploy.*.env'
   # Local secrets that must never reach the VPS.
   --exclude 'askpass.sh' --exclude '*.pem' --exclude '*.key'
 )
 
 # `docker` may or may not need sudo, depending on group membership.
 DOCKER_SUDO=""
-# Whether `sudo -n` works at all for this user. Tracked separately from
-# DOCKER_SUDO: reaching the daemon unprivileged says nothing about root-only
-# steps, which is what previously made the volume chown silently unrunnable.
+# Whether `sudo -n` works at all for this user.
 SUDO_OK=false
 
 # Every command issued here is idempotent (mkdir, test, df, chown, compose up),
@@ -93,23 +197,19 @@ remote() {
 # empty file. Used only to stream .env.
 remote_once() { ssh "${SSH_OPTS[@]}" "$DEPLOY_USER@$DEPLOY_HOST" "$@"; }
 
-# DOCKER_SUDO is decided by remote_preflight, which probes the daemon. A
-# configurable sudo mode is deliberately not offered: a password-prompting
-# sudo over a non-interactive ssh hangs the deploy instead of failing.
-# `docker compose` therefore escalates only when the daemon demands it.
+# Escalates only when the daemon demands it.
 remote_docker() { if [[ -n "$DOCKER_SUDO" ]]; then remote "$DOCKER_SUDO" "$@"; else remote "$@"; fi; }
-# Root-only work (chown under /var/lib/docker) needs real root even when docker
-# itself runs unprivileged, so it uses SUDO_OK rather than DOCKER_SUDO.
+# Root-only work (chown under /var/lib/docker) needs real root even when docker runs unprivileged.
 remote_root() { if [[ "$SUDO_OK" == true ]]; then remote "sudo -n" "$@"; else remote "$@"; fi; }
 
 # ---------------------------------------------------------------- preflight --
 
 preflight() {
-  log "Checking configuration"
+  log "Checking configuration (target: $TARGET_NAME)"
   for var in DEPLOY_HOST DEPLOY_USER DEPLOY_PORT DEPLOY_PATH; do
-    [[ -n "${!var:-}" ]] || die "$var is not set in deploy.env"
+    [[ -n "${!var:-}" ]] || die "$var is not set in deploy configuration"
   done
-  [[ -n "$DEPLOY_HOST" ]] || die "DEPLOY_HOST is empty — edit deploy.env"
+  [[ -n "$DEPLOY_HOST" ]] || die "DEPLOY_HOST is empty — check deploy.env or deploy.${TARGET_NAME}.env"
 
   for f in docker-compose.yml neko.yaml policies.json .env; do
     [[ -f "$f" ]] || die "$f is missing"
@@ -119,18 +219,14 @@ preflight() {
   dim "compose config valid"
 
   remote true \
-    || die "cannot reach $DEPLOY_USER@$DEPLOY_HOST port $DEPLOY_PORT — check DEPLOY_HOST/DEPLOY_USER/DEPLOY_PORT and your SSH key"
+    || die "cannot reach $DEPLOY_USER@$DEPLOY_HOST port $DEPLOY_PORT — check DEPLOY_HOST/DEPLOY_USER/DEPLOY_PORT and your SSH key ($SSH_KEY)"
 
   resolve_path
 }
 
-# rsync runs as the SSH user, so the deploy directory must be writable by that
-# user — a root-owned path like /opt/neko-farm cannot work. Resolve ~ against
-# the *remote* home rather than expanding it locally.
 resolve_path() {
   case "$DEPLOY_PATH" in
     "~"|"") DEPLOY_PATH=$(remote "echo \$HOME") ;;
-    # One round trip, not two: each remote call costs a handshake on this link.
     "~/"*)  DEPLOY_PATH="$(remote "echo \$HOME/${DEPLOY_PATH#\~/}")" ;;
   esac
 }
@@ -138,9 +234,26 @@ resolve_path() {
 # ------------------------------------------------------------------ remote --
 
 remote_preflight() {
-  log "Checking VPS"
-  # Probe the daemon, not the client: `docker --version` succeeds even for a
-  # user with no daemon access, which made the old check pass pointlessly.
+  log "Checking VPS ($DEPLOY_USER@$DEPLOY_HOST:$DEPLOY_PORT)"
+
+  # Probe remote architecture (Multi-arch verification: AMD64 vs ARM64)
+  local remote_arch
+  remote_arch=$(remote "uname -m 2>/dev/null" || true)
+  case "$remote_arch" in
+    aarch64|arm64)
+      log "Detected CPU: $remote_arch (ARM64 - Ampere A1 / Apple Silicon)"
+      dim "Multi-arch image ghcr.io/m1k1o/neko/firefox:3 supports linux/arm64 natively"
+      ;;
+    x86_64|amd64)
+      log "Detected CPU: $remote_arch (AMD64 / x86_64)"
+      dim "Multi-arch image ghcr.io/m1k1o/neko/firefox:3 supports linux/amd64 natively"
+      ;;
+    *)
+      warn "Unrecognized remote architecture: '$remote_arch'"
+      ;;
+  esac
+
+  # Probe docker daemon access
   if remote "docker info" >/dev/null 2>&1; then
     DOCKER_SUDO=""
     dim "docker daemon accessible directly (no sudo needed)"
@@ -151,16 +264,9 @@ remote_preflight() {
     die "no docker access as $DEPLOY_USER, and passwordless sudo is unavailable.
        Fix it on the VPS — either:
          sudo usermod -aG docker $DEPLOY_USER
-       then reconnect so the new group takes effect. Note that membership of the
-       docker group is equivalent to root access on that host."
+       then reconnect so the new group takes effect."
   fi
 
-  # Root escalation is tracked on its own. The volume chown below is the only
-  # step that genuinely needs root, and it is needed even when docker itself is
-  # reachable as $DEPLOY_USER. Deriving it from DOCKER_SUDO meant the chown ran
-  # unprivileged, failed with "Permission denied", and printed a warning telling
-  # the operator to run sudo by hand even though passwordless sudo already
-  # worked — the deploy "succeeded" but Neko lost its session on every restart.
   if remote "sudo -n true" >/dev/null 2>&1; then
     SUDO_OK=true
     dim "passwordless sudo available for root-only steps"
@@ -169,16 +275,12 @@ remote_preflight() {
     dim "no passwordless sudo — Neko sessions will not persist across restarts"
   fi
 
-  # awk rather than `tail -1` so a header line cannot be mistaken for the value,
-  # and the result is validated rather than coerced — silently concatenating
-  # digits from a whole df line would fake a healthy disk.
   local free_mb
   free_mb=$(remote "df -Pm / 2>/dev/null | awk 'NR==2 {print \$4}'" | head -1)
   [[ "$free_mb" =~ ^[0-9]+$ ]] || die "could not read free space on the VPS (got: '$free_mb')"
   [[ "$free_mb" -ge 1500 ]] || warn "only ${free_mb} MB free on / — the image needs ~1.5 GB"
   dim "docker present, ${free_mb} MB free"
 
-  # Fail here, with an actionable message, rather than partway through rsync.
   remote "mkdir -p '$DEPLOY_PATH'" 2>/dev/null \
     || die "cannot create $DEPLOY_PATH as $DEPLOY_USER — set DEPLOY_PATH to somewhere writable, e.g. ~/neko-farm"
   remote "test -w '$DEPLOY_PATH'" 2>/dev/null \
@@ -186,24 +288,41 @@ remote_preflight() {
   dim "deploy path $DEPLOY_PATH"
 }
 
-# Push .env only when the server has none, so secrets are not overwritten on
-# every run but a first deploy still works unattended.
 seed_env() {
   if remote "test -f '$DEPLOY_PATH/.env'"; then
     log "Keeping existing remote .env"
     return
   fi
-  log "Seeding remote .env from local (first deploy only)"
+  log "Seeding remote .env from local (first deploy on $TARGET_NAME)"
   local tmp ip
   tmp=$(mktemp)
-  # VPS_PUBLIC_IP defaults to DEPLOY_HOST so Neko advertises the right address.
-  ip=$(grep -E '^VPS_PUBLIC_IP=' .env | cut -d= -f2- | tr -d '[:space:]')
-  [[ -n "$ip" ]] || ip="$DEPLOY_HOST"
+  # VPS_PUBLIC_IP MUST match DEPLOY_HOST so ICE candidates resolve directly to this host
+  ip="${VPS_PUBLIC_IP:-$DEPLOY_HOST}"
   sed "s|^VPS_PUBLIC_IP=.*|VPS_PUBLIC_IP=$ip|" .env >"$tmp"
-  # Redirect the file, not its path: the remote shell does the write and the
-  # mv, so the .env appears atomically rather than half-written.
-  # remote_once, not remote: stdin is a one-shot stream, so a retry would write a
-  # truncated or empty .env. The master connection already covers the slow path.
+
+  # Append optional resource tuning if set
+  if [[ -n "${NEKO_MEM_LIMIT:-}" ]]; then
+    if grep -q '^NEKO_MEM_LIMIT=' "$tmp"; then
+      sed -i "s|^NEKO_MEM_LIMIT=.*|NEKO_MEM_LIMIT=$NEKO_MEM_LIMIT|" "$tmp"
+    else
+      echo "NEKO_MEM_LIMIT=$NEKO_MEM_LIMIT" >> "$tmp"
+    fi
+  fi
+  if [[ -n "${NEKO_SHM_SIZE:-}" ]]; then
+    if grep -q '^NEKO_SHM_SIZE=' "$tmp"; then
+      sed -i "s|^NEKO_SHM_SIZE=.*|NEKO_SHM_SIZE=$NEKO_SHM_SIZE|" "$tmp"
+    else
+      echo "NEKO_SHM_SIZE=$NEKO_SHM_SIZE" >> "$tmp"
+    fi
+  fi
+  if [[ -n "${NEKO_DESKTOP_SCREEN:-}" ]]; then
+    if grep -q '^NEKO_DESKTOP_SCREEN=' "$tmp"; then
+      sed -i "s|^NEKO_DESKTOP_SCREEN=.*|NEKO_DESKTOP_SCREEN=$NEKO_DESKTOP_SCREEN|" "$tmp"
+    else
+      echo "NEKO_DESKTOP_SCREEN=$NEKO_DESKTOP_SCREEN" >> "$tmp"
+    fi
+  fi
+
   if ! remote_once "cat > '$DEPLOY_PATH/.env.tmp' && mv '$DEPLOY_PATH/.env.tmp' '$DEPLOY_PATH/.env'" <"$tmp"; then
     rm -f "$tmp"
     die "failed to write $DEPLOY_PATH/.env on the VPS"
@@ -222,55 +341,41 @@ sync_files() {
 }
 
 start() {
-  log "Starting stack"
+  log "Starting stack on $TARGET_NAME"
   remote "mkdir -p '$DEPLOY_PATH/profile'"
-  # Chown first: a file left root-owned by an earlier mount would otherwise
-  # block the copy below, since the SSH user cannot overwrite it.
-  # Firefox refuses to run against a root-owned profile.
   remote_root "chown -R 1000:1000 '$DEPLOY_PATH/profile'"
-  # The named volume is created root-owned by docker, but Neko runs as UID 1000
-  # and cannot write its session file without this. Uses remote_root, not
-  # remote_docker: the volume lives under /var/lib/docker and is unreadable to
-  # the SSH user even when docker itself needs no sudo.
+
   local vol
   vol=$(remote_docker "docker volume ls -q --filter name=neko-farm_neko-data 2>/dev/null | head -1")
   if [[ -n "$vol" ]]; then
     if remote_root "chown -R 1000:1000 /var/lib/docker/volumes/$vol/_data" 2>/dev/null; then
       dim "volume $vol owned by 1000:1000"
     else
-      warn "could not chown $vol (needs root). Neko sessions will not persist across"
-      warn "restarts, so you will re-log in to Neko each time. Fix once with:"
-      printf '%s\n' "      ssh -p $DEPLOY_PORT $DEPLOY_USER@$DEPLOY_HOST \\" \
-        "        'sudo chown -R 1000:1000 /var/lib/docker/volumes/$vol/_data'"
+      warn "could not chown $vol (needs root). Neko sessions will not persist across restarts."
+      warn "Fix once with: ssh -p $DEPLOY_PORT $DEPLOY_USER@$DEPLOY_HOST 'sudo chown -R 1000:1000 /var/lib/docker/volumes/$vol/_data'"
     fi
   fi
-  # user.js is copied into the profile rather than bind-mounted into it: nesting
-  # a mount inside the profile mount leaves a read-only mountpoint that
-  # `chown -R` cannot traverse, which aborts the deploy.
+
   if [[ -f user.js ]]; then
-    # Unlink first rather than overwrite: a file left root-owned by an earlier
-    # nested mount cannot be overwritten by the SSH user, but it can be removed,
-    # since that only needs write permission on the directory.
     remote "rm -f '$DEPLOY_PATH/profile/user.js' && cp '$DEPLOY_PATH/user.js' '$DEPLOY_PATH/profile/user.js'"
     dim "user.js installed into profile"
   fi
-  remote_docker "cd '$DEPLOY_PATH' && docker compose up -d --remove-orphans"
+
+  remote_docker "cd '$DEPLOY_PATH' && NEKO_MEM_LIMIT='${NEKO_MEM_LIMIT:-}' NEKO_SHM_SIZE='${NEKO_SHM_SIZE:-}' NEKO_DESKTOP_SCREEN='${NEKO_DESKTOP_SCREEN:-}' docker compose up -d --remove-orphans"
 }
 
 report() {
-  log "Status"
+  log "Status ($TARGET_NAME)"
   remote_docker "cd '$DEPLOY_PATH' && docker compose ps" || true
   echo
   warn "Check the logs for 'neko ready':"
   dim "ssh -p $DEPLOY_PORT $DEPLOY_USER@$DEPLOY_HOST 'docker logs --tail 30 neko-farm-neko-1'"
   echo
-  if [[ -n "${PUBLIC_HOSTNAME:-}" ]]; then
-    log "Open https://$PUBLIC_HOSTNAME and log in with NEKO_PASSWORD from .env"
+  local hostname="${PUBLIC_HOSTNAME:-${KICK_HOSTNAME:-}}"
+  if [[ -n "$hostname" ]]; then
+    log "Open https://$hostname and log in with NEKO_PASSWORD from .env"
     dim "First time only: log in, sign in once, pick a low quality, and close the tab."
   fi
-  # TCPMUX is configured (NEKO_WEBRTC_TCPMUX=52000), so media is a single TCP
-  # port, not the 52000-52100/udp range. Telling the operator to open UDP sent
-  # them chasing a firewall rule that the stack does not use.
   warn "Media is WebRTC over TCP ${DEPLOY_HOST}:52000 (TCPMUX) and does NOT go through the tunnel."
   dim "UI loads but picture is black = TCP 52000 is blocked upstream, or VPS_PUBLIC_IP is wrong."
 }
@@ -278,17 +383,14 @@ report() {
 main() {
   preflight
   remote_preflight
+  if [[ "$CHECK_ONLY" == true ]]; then
+    log "Preflight passed for target: $TARGET_NAME"
+    exit 0
+  fi
   sync_files
   seed_env
   start
   report
 }
 
-if [[ "${1:-}" == "--check" ]]; then
-  preflight
-  remote_preflight
-  log "Preflight passed"
-  exit 0
-fi
-
-main "$@"
+main

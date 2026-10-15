@@ -5,6 +5,10 @@
   "description": "Persistent remote browser on a small VPS, reachable over a Cloudflare Tunnel",
   "scripts": {
     "deploy": "bash scripts/deploy.sh",
-    "deploy:check": "bash scripts/deploy.sh --check"
+    "deploy:original": "bash scripts/deploy.sh --target original",
+    "deploy:oracle": "bash scripts/deploy.sh --target oracle",
+    "deploy:check": "bash scripts/deploy.sh --check",
+    "deploy:check:original": "bash scripts/deploy.sh --check --target original",
+    "deploy:check:oracle": "bash scripts/deploy.sh --check --target oracle"
   }
 }

@@ -10,11 +10,11 @@ services:
   neko:
     image: ghcr.io/m1k1o/neko/firefox:3
     restart: unless-stopped
-    # shm_size is a ceiling on tmpfs, not a reservation — it costs nothing until
-    # used. Firefox does not need Chromium's 2 GB, so this is headroom, not pressure.
-    shm_size: 512mb
-    mem_limit: 1400m
-    mem_reservation: 500m
+    # Memory and screen can be configured via environment variables (e.g. for Ampere A1 with 12GB RAM)
+    # or left to defaults for smaller 2GB instances.
+    shm_size: ${NEKO_SHM_SIZE:-512mb}
+    mem_limit: ${NEKO_MEM_LIMIT:-1400m}
+    mem_reservation: ${NEKO_MEM_RESERVATION:-500m}
     ports:
       - "127.0.0.1:7000:8080"          # TCP signaling/UI, localhost only
       # Media is multiplexed onto this single TCP port. WebRTC normally needs
@@ -34,8 +34,8 @@ services:
       - NEKO_WEBRTC_NAT1TO1=${VPS_PUBLIC_IP}
       # cloudflared terminates TLS — without this Neko ignores X-Forwarded-*.
       - NEKO_SERVER_PROXY=true
-      # Tuned for a 2 GB host. The 800x600@5 values were a 1 GB emergency setting.
-      - NEKO_DESKTOP_SCREEN=1024x576@10
+      # Tuned for a 2 GB host by default (1024x576@10). High-spec hosts can override via NEKO_DESKTOP_SCREEN.
+      - NEKO_DESKTOP_SCREEN=${NEKO_DESKTOP_SCREEN:-1024x576@10}
       # Session provider defaults to in-memory, which means re-authenticating to
       # Neko itself on every restart. Persist it alongside the browser profile.
       # The v2-era web client authenticates the WebSocket with an explicit
@@ -48,6 +48,7 @@ services:
       # acceptable here.
       - NEKO_SESSION_COOKIE_ENABLED=false
       - NEKO_SESSION_FILE=/data/sessions.json
+      - NEKO_SESSION_IMPLICIT_HOSTING=true
       # Neko plugins only — these gate Neko's own chat and file transfer, not
       # anything in the browsing session. Source reads `chat.enabled` /
       # `filetransfer.enabled`, so these are the top-level names. The

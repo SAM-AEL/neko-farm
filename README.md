@@ -13,26 +13,44 @@ a normal browser stack will not fit.
 
 ## Deploy
 
+Supports both **x86_64 (AMD64)** and **ARM64 (aarch64 / Oracle Ampere A1)** natively via multi-arch Neko images (`ghcr.io/m1k1o/neko/firefox:3`).
+
+### Deploy to either VPS:
+
 ```bash
-cp deploy.env.example deploy.env   # fill in DEPLOY_HOST at minimum
-yarn install                        # first time only, to get yarn.lock
-yarn deploy
+# Deploy to original x86_64 VPS (reads deploy.original.env)
+yarn deploy:original
+
+# Deploy to Oracle Ampere A1 ARM64 VPS (reads deploy.oracle.env / Doppler)
+yarn deploy:oracle
+
+# Preflight check without deploying:
+yarn deploy:check:original
+yarn deploy:check:oracle
 ```
 
-`yarn deploy:check` validates config and VPS reachability without changing
-anything. Target host comes from `deploy.env`:
+Or deploy with custom overrides:
+```bash
+DEPLOY_HOST=1.2.3.4 DEPLOY_PORT=22 bash scripts/deploy.sh
+```
+
+Target configuration files (gitignored):
+- `deploy.original.env`: Configuration for the original 2 GB x86_64 VPS.
+- `deploy.oracle.env`: Configuration for the Oracle Cloud Ampere A1 (12 GB RAM / 2 vCPU) VPS.
+- `deploy.env`: Default fallback profile.
 
 | Var | Meaning |
 | --- | --- |
-| `DEPLOY_HOST` | VPS public IP or hostname |
-| `DEPLOY_USER` | SSH user |
-| `DEPLOY_PORT` | SSH port |
-| `DEPLOY_PATH` | Deploy directory on the VPS — must be writable by `DEPLOY_USER` |
-| `PUBLIC_HOSTNAME` | Public hostname — printed at the end, not configured by the script |
+| `DEPLOY_HOST` | VPS public IP or hostname (or auto-filled via Doppler `prd_infra`) |
+| `DEPLOY_USER` | SSH user (`sam`) |
+| `DEPLOY_PORT` | SSH port (e.g., `20207` or `22069`) |
+| `DEPLOY_PATH` | Deploy directory on the VPS (defaults to `~/neko-farm`) |
+| `PUBLIC_HOSTNAME` | Public hostname (`b.buzzeee.com`) |
+| `NEKO_MEM_LIMIT` | Optional container memory cap (`1400m` on original, `3072m` on Oracle) |
+| `NEKO_SHM_SIZE` | Shared memory ceiling (`512mb` on original, `1024mb` on Oracle) |
+| `NEKO_DESKTOP_SCREEN` | Resolution & framerate (`1024x576@10` or `1280x720@15`) |
 
-What `yarn deploy` does: validate the compose file locally → check docker, disk
-space, SSH, and directory writability on the VPS → rsync the stack → seed `.env` if
-the server has none → `chown` the profile → `docker compose up -d`.
+What `yarn deploy` does: validate the compose file locally → probe remote architecture (`uname -m` -> AMD64 or ARM64) → check docker, disk space, SSH, and directory writability on the VPS → rsync the stack → seed `.env` if the server has none → `chown` the profile → `docker compose up -d`.
 
 **`profile/` and `.env` are never synced.** The profile holds the browser session
 and `.env` holds secrets; both are remote state. They are excluded from rsync,
