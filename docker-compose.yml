@@ -16,7 +16,7 @@ services:
     mem_limit: ${NEKO_MEM_LIMIT:-1400m}
     mem_reservation: ${NEKO_MEM_RESERVATION:-500m}
     ports:
-      - "127.0.0.1:7000:8080"          # TCP signaling/UI, localhost only
+      - "${NEKO_BIND_IP:-127.0.0.1}:${NEKO_PORT:-7000}:8080"          # TCP signaling/UI, localhost only
       # Media is multiplexed onto this single TCP port. WebRTC normally needs
       # the whole 52000-52100/udp range open, which is impractical when the
       # provider's firewall wants one rule per port. TCPMUX trades some

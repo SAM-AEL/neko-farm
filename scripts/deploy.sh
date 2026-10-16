@@ -197,6 +197,9 @@ remote() {
 # empty file. Used only to stream .env.
 remote_once() { ssh "${SSH_OPTS[@]}" "$DEPLOY_USER@$DEPLOY_HOST" "$@"; }
 
+# For test commands where non-zero is an expected check (e.g. test -f, grep) without retrying or printing warnings
+remote_test() { ssh "${SSH_OPTS[@]}" "$DEPLOY_USER@$DEPLOY_HOST" "$@"; }
+
 # Escalates only when the daemon demands it.
 remote_docker() { if [[ -n "$DOCKER_SUDO" ]]; then remote "$DOCKER_SUDO" "$@"; else remote "$@"; fi; }
 # Root-only work (chown under /var/lib/docker) needs real root even when docker runs unprivileged.
@@ -289,8 +292,14 @@ remote_preflight() {
 }
 
 seed_env() {
-  if remote "test -f '$DEPLOY_PATH/.env'"; then
-    log "Keeping existing remote .env"
+  if remote_test "test -f '$DEPLOY_PATH/.env'"; then
+    log "Keeping existing remote .env (syncing port/overrides if set)"
+    if [[ -n "${NEKO_PORT:-}" ]]; then
+      remote "grep -q '^NEKO_PORT=' '$DEPLOY_PATH/.env' && sed -i 's|^NEKO_PORT=.*|NEKO_PORT=$NEKO_PORT|' '$DEPLOY_PATH/.env' || echo 'NEKO_PORT=$NEKO_PORT' >> '$DEPLOY_PATH/.env'"
+    fi
+    if [[ -n "${NEKO_BIND_IP:-}" ]]; then
+      remote "grep -q '^NEKO_BIND_IP=' '$DEPLOY_PATH/.env' && sed -i 's|^NEKO_BIND_IP=.*|NEKO_BIND_IP=$NEKO_BIND_IP|' '$DEPLOY_PATH/.env' || echo 'NEKO_BIND_IP=$NEKO_BIND_IP' >> '$DEPLOY_PATH/.env'"
+    fi
     return
   fi
   log "Seeding remote .env from local (first deploy on $TARGET_NAME)"
@@ -300,7 +309,21 @@ seed_env() {
   ip="${VPS_PUBLIC_IP:-$DEPLOY_HOST}"
   sed "s|^VPS_PUBLIC_IP=.*|VPS_PUBLIC_IP=$ip|" .env >"$tmp"
 
-  # Append optional resource tuning if set
+  # Append optional resource tuning and ports if set
+  if [[ -n "${NEKO_PORT:-}" ]]; then
+    if grep -q '^NEKO_PORT=' "$tmp"; then
+      sed -i "s|^NEKO_PORT=.*|NEKO_PORT=$NEKO_PORT|" "$tmp"
+    else
+      echo "NEKO_PORT=$NEKO_PORT" >> "$tmp"
+    fi
+  fi
+  if [[ -n "${NEKO_BIND_IP:-}" ]]; then
+    if grep -q '^NEKO_BIND_IP=' "$tmp"; then
+      sed -i "s|^NEKO_BIND_IP=.*|NEKO_BIND_IP=$NEKO_BIND_IP|" "$tmp"
+    else
+      echo "NEKO_BIND_IP=$NEKO_BIND_IP" >> "$tmp"
+    fi
+  fi
   if [[ -n "${NEKO_MEM_LIMIT:-}" ]]; then
     if grep -q '^NEKO_MEM_LIMIT=' "$tmp"; then
       sed -i "s|^NEKO_MEM_LIMIT=.*|NEKO_MEM_LIMIT=$NEKO_MEM_LIMIT|" "$tmp"
@@ -343,25 +366,35 @@ sync_files() {
 start() {
   log "Starting stack on $TARGET_NAME"
   remote "mkdir -p '$DEPLOY_PATH/profile'"
-  remote_root "chown -R 1000:1000 '$DEPLOY_PATH/profile'"
-
-  local vol
-  vol=$(remote_docker "docker volume ls -q --filter name=neko-farm_neko-data 2>/dev/null | head -1")
-  if [[ -n "$vol" ]]; then
-    if remote_root "chown -R 1000:1000 /var/lib/docker/volumes/$vol/_data" 2>/dev/null; then
-      dim "volume $vol owned by 1000:1000"
-    else
-      warn "could not chown $vol (needs root). Neko sessions will not persist across restarts."
-      warn "Fix once with: ssh -p $DEPLOY_PORT $DEPLOY_USER@$DEPLOY_HOST 'sudo chown -R 1000:1000 /var/lib/docker/volumes/$vol/_data'"
-    fi
-  fi
 
   if [[ -f user.js ]]; then
     remote "rm -f '$DEPLOY_PATH/profile/user.js' && cp '$DEPLOY_PATH/user.js' '$DEPLOY_PATH/profile/user.js'"
     dim "user.js installed into profile"
   fi
 
-  remote_docker "cd '$DEPLOY_PATH' && NEKO_MEM_LIMIT='${NEKO_MEM_LIMIT:-}' NEKO_SHM_SIZE='${NEKO_SHM_SIZE:-}' NEKO_DESKTOP_SCREEN='${NEKO_DESKTOP_SCREEN:-}' docker compose up -d --remove-orphans"
+  # Ensure profile permissions allow UID 1000 (neko user) to read/write.
+  # If host passwordless sudo works, use host chown/chmod.
+  # Otherwise, execute chown/chmod via container root (u:0) so sudo is not needed.
+  if [[ "$SUDO_OK" == true ]]; then
+    remote "sudo -n chown -R 1000:1000 '$DEPLOY_PATH/profile' && sudo -n chmod -R 775 '$DEPLOY_PATH/profile'" 2>/dev/null || true
+  else
+    remote_docker "docker run --rm -u 0 -v '$DEPLOY_PATH/profile':/target ghcr.io/m1k1o/neko/firefox:3 sh -c 'chown -R 1000:1000 /target && chmod -R 777 /target'" 2>/dev/null || true
+  fi
+
+  # Ensure named volume exists and is owned by 1000:1000 for session persistence across restarts
+  remote_docker "docker volume create neko-farm_neko-data >/dev/null 2>&1 || true"
+  if [[ "$SUDO_OK" == true ]]; then
+    local vol
+    vol=$(remote_docker "docker volume ls -q --filter name=neko-farm_neko-data 2>/dev/null | head -1")
+    if [[ -n "$vol" ]]; then
+      remote "sudo -n chown -R 1000:1000 /var/lib/docker/volumes/$vol/_data" 2>/dev/null || true
+    fi
+  else
+    remote_docker "docker run --rm -u 0 -v neko-farm_neko-data:/data ghcr.io/m1k1o/neko/firefox:3 chown -R 1000:1000 /data" 2>/dev/null || true
+  fi
+  dim "profile and data volume permissions ensured for UID 1000"
+
+  remote_docker "cd '$DEPLOY_PATH' && NEKO_PORT='${NEKO_PORT:-7000}' NEKO_BIND_IP='${NEKO_BIND_IP:-127.0.0.1}' NEKO_MEM_LIMIT='${NEKO_MEM_LIMIT:-}' NEKO_SHM_SIZE='${NEKO_SHM_SIZE:-}' NEKO_DESKTOP_SCREEN='${NEKO_DESKTOP_SCREEN:-}' docker compose up -d --remove-orphans"
 }
 
 report() {
@@ -376,6 +409,7 @@ report() {
     log "Open https://$hostname and log in with NEKO_PASSWORD from .env"
     dim "First time only: log in, sign in once, pick a low quality, and close the tab."
   fi
+  dim "Local port bound: ${NEKO_BIND_IP:-127.0.0.1}:${NEKO_PORT:-7000} -> container 8080 (tunnel ingress)"
   warn "Media is WebRTC over TCP ${DEPLOY_HOST}:52000 (TCPMUX) and does NOT go through the tunnel."
   dim "UI loads but picture is black = TCP 52000 is blocked upstream, or VPS_PUBLIC_IP is wrong."
 }
